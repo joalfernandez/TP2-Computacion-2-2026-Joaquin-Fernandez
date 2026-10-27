@@ -1,0 +1,19 @@
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      NUM_WORKERS: 4
+      NUM_PROCESOS: 2
+      TAMANIO_COLA: 1000
+      TIMEOUT_DEFECTO: 60
+      ESPERA_APAGADO: 20
+      DIR_DATOS: /app/datos
+    volumes:
+      # Los estado_<timestamp>.json quedan en ./datos del host y
+      # sobreviven aunque se borre el contenedor.
+      - ./datos:/app/datos
+    # Tiempo entre el SIGTERM y el SIGKILL de `docker compose stop`.
+    # Tiene que ser mayor que ESPERA_APAGADO para que llegue a volcar el estado.
+    stop_grace_period: 30s
