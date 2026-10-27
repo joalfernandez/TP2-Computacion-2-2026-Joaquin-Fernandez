@@ -9,5 +9,9 @@ NUM_WORKERS = int(os.getenv("NUM_WORKERS", "4"))
 # en vez de acumular memoria sin límite (control de flujo).
 TAMANIO_COLA = int(os.getenv("TAMANIO_COLA", "1000"))
 
+# Procesos del ProcessPoolExecutor para tareas CPU-bound.
+# Por defecto, uno por núcleo: más procesos que núcleos no calculan más rápido.
+NUM_PROCESOS = int(os.getenv("NUM_PROCESOS", str(os.cpu_count() or 2)))
+
 # Timeout por defecto de cada tarea, en segundos.
 TIMEOUT_DEFECTO = float(os.getenv("TIMEOUT_DEFECTO", "60"))

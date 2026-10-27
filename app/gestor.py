@@ -9,6 +9,7 @@ interrumpir a una corrutina.
 import asyncio
 import logging
 import time
+from concurrent.futures import Executor
 from typing import Any
 
 from app.modelos import ESTADOS_FINALES, Estado, Tarea, TipoTarea
@@ -22,8 +23,11 @@ class ColaLlena(Exception):
 
 
 class Gestor:
-    def __init__(self, num_workers: int, tamanio_cola: int):
+    def __init__(self, num_workers: int, tamanio_cola: int, pool: Executor):
         self.num_workers = num_workers
+        # Pool de procesos para tareas CPU-bound. Se crea una sola vez
+        # (crear procesos es caro) y lo comparten todos los workers.
+        self.pool = pool
         self.tareas: dict[str, Tarea] = {}
         # La cola guarda solo ids; la tarea completa vive en self.tareas.
         self.cola: asyncio.Queue[str] = asyncio.Queue(maxsize=tamanio_cola)
@@ -119,7 +123,7 @@ class Gestor:
         tarea.iniciada = time.time()
         self.ocupados += 1
         try:
-            tarea.resultado = await EJECUTORES[tarea.tipo](tarea.parametros)
+            tarea.resultado = await EJECUTORES[tarea.tipo](tarea.parametros, self.pool)
             tarea.estado = Estado.COMPLETADA
         except Exception as e:
             # Capturamos todo para que una tarea que falla NO mate al worker.
