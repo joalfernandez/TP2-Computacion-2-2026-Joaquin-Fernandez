@@ -22,6 +22,15 @@ class ColaLlena(Exception):
     """La cola alcanzó su maxsize: el cliente tiene que reintentar más tarde."""
 
 
+class Apagando(Exception):
+    """El servidor se está apagando y ya no acepta tareas nuevas."""
+
+
+# Centinela: un valor especial que, al sacarlo de la cola, le dice al
+# worker "no hay más trabajo, terminá".
+FIN = None
+
+
 class Gestor:
     def __init__(self, num_workers: int, tamanio_cola: int, pool: Executor):
         self.num_workers = num_workers
@@ -29,10 +38,11 @@ class Gestor:
         # (crear procesos es caro) y lo comparten todos los workers.
         self.pool = pool
         self.tareas: dict[str, Tarea] = {}
-        # La cola guarda solo ids; la tarea completa vive en self.tareas.
-        self.cola: asyncio.Queue[str] = asyncio.Queue(maxsize=tamanio_cola)
+        # La cola guarda solo ids (o el centinela FIN); la tarea completa vive en self.tareas.
+        self.cola: asyncio.Queue[str | None] = asyncio.Queue(maxsize=tamanio_cola)
         self.workers: list[asyncio.Task] = []
         self.ocupados = 0
+        self.aceptando = True
 
     # ------------------------------------------------------------------
     # Ciclo de vida
@@ -43,12 +53,37 @@ class Gestor:
             self.workers.append(asyncio.create_task(self._worker(n), name=f"worker-{n}"))
         log.info("Pool iniciado con %d workers", self.num_workers)
 
-    async def detener(self) -> None:
-        for w in self.workers:
-            w.cancel()
-        # return_exceptions=True: que el CancelledError de cada worker
-        # no corte el gather antes de que terminen los demás.
-        await asyncio.gather(*self.workers, return_exceptions=True)
+    async def detener(self, espera_maxima: float) -> None:
+        """Apagado ordenado en 4 pasos."""
+        # 1. No aceptar tareas nuevas.
+        self.aceptando = False
+
+        # 2. Sacar de la cola las pendientes, para que ningún worker las
+        #    empiece. Quedan en estado "pendiente" en el volcado.
+        sin_ejecutar = 0
+        while not self.cola.empty():
+            self.cola.get_nowait()
+            self.cola.task_done()
+            sin_ejecutar += 1
+        if sin_ejecutar:
+            log.info("%d tareas pendientes quedan sin ejecutar", sin_ejecutar)
+
+        # 3. Un centinela por worker: cada uno termina su tarea actual,
+        #    saca un FIN y sale del while. Esperamos, pero con límite.
+        for _ in self.workers:
+            await self.cola.put(FIN)
+        log.info("Esperando hasta %.0f s a %d tareas en curso", espera_maxima, self.ocupados)
+        _, sin_terminar = await asyncio.wait(self.workers, timeout=espera_maxima)
+
+        # 4. A los que no llegaron a tiempo, los cancelamos. Eso cancela
+        #    también la tarea que estaban ejecutando (queda "cancelada").
+        if sin_terminar:
+            log.warning("Cancelando %d tareas que no terminaron a tiempo", len(sin_terminar))
+            for w in sin_terminar:
+                w.cancel()
+            # return_exceptions=True: que el CancelledError de cada worker
+            # no corte el gather antes de que terminen los demás.
+            await asyncio.gather(*sin_terminar, return_exceptions=True)
         log.info("Pool detenido")
 
     # ------------------------------------------------------------------
@@ -56,6 +91,8 @@ class Gestor:
     # ------------------------------------------------------------------
 
     def encolar(self, tipo: TipoTarea, parametros: dict[str, Any], timeout: float) -> Tarea:
+        if not self.aceptando:
+            raise Apagando()
         tarea = Tarea(tipo=tipo, parametros=parametros, timeout=timeout)
         try:
             # put_nowait no espera: si la cola está llena, falla al instante.
@@ -118,6 +155,9 @@ class Gestor:
     async def _worker(self, n: int) -> None:
         while True:
             tarea_id = await self.cola.get()
+            if tarea_id is FIN:
+                self.cola.task_done()
+                return
             try:
                 tarea = self.tareas[tarea_id]
                 if tarea.estado == Estado.CANCELADA:
